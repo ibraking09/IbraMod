@@ -1,0 +1,38 @@
+name: Build IbraMod Exe
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install customtkinter minecraft-launcher-lib requests pyinstaller
+
+    - name: Build with PyInstaller
+      run: |
+        # Using --collect-all to fix the customtkinter error you saw earlier
+        pyinstaller --noconfirm --onedir --windowed --name "IbraMod" --collect-all customtkinter mc_manager.py
+
+    - name: Zip the Build
+      run: |
+        powershell Compress-Archive -Path dist/IbraMod -DestinationPath IbraMod-Offline.zip
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: IbraMod-Offline
+        path: IbraMod-Offline.zip
