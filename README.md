@@ -41,7 +41,7 @@ pip install -r requirements.txt
 
 3. Run the manager:
 ```bash
-python mc_manager.py
+python IbraMod.py
 ```
 
 ## Building it Yourself
