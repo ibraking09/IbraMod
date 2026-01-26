@@ -12,7 +12,7 @@ from pathlib import Path
 from tkinter import messagebox
 
 # --- Constants ---
-APP_NAME = "IbraMod Offline"
+APP_NAME = "IbraMod Launcher"
 BASE_DIR = Path.cwd() / "instances"
 CACHE_FILE = Path.cwd() / "name_cache.json"
 TEMP_DIR = Path.cwd() / "temp"
@@ -44,7 +44,7 @@ class Backend:
     def __init__(self):
         self.modrinth = Modrinth()
         self.name_cache = self.load_cache()
-        self.username = "Player"  # Default offline name
+        self.username = "Player" 
 
     def load_cache(self):
         if CACHE_FILE.exists():
@@ -68,6 +68,7 @@ class Backend:
         config = self.get_instance_config(name)
         loader_type = config.get("loader", "Vanilla").lower()
         
+        # Find the correct version ID to launch
         installed = mclib.utils.get_installed_versions(str(mc_dir))
         if not installed: return
         
@@ -76,19 +77,22 @@ class Backend:
             vid = v['id']
             if loader_type == "fabric" and "fabric" in vid.lower(): ver_id = vid; break
             elif loader_type == "forge" and "forge" in vid.lower(): ver_id = vid; break
-            elif loader_type == "modpack" and ("fabric" in vid.lower() or "forge" in vid.lower()): ver_id = vid; break
+            elif loader_type == "quilt" and "quilt" in vid.lower(): ver_id = vid; break
+            elif loader_type == "vanilla" and "fabric" not in vid and "forge" not in vid: ver_id = vid; break
         
+        # Fallback
         if not ver_id: ver_id = installed[0]['id']
-        print(f"Launching Version ID: {ver_id} as {username}")
+        
+        print(f"Launching Version ID: {ver_id} as {username} (Loader: {loader_type})")
 
-        # OFFLINE OPTIONS
+        # Standard Authentication Options
         options = {
             "launcherName": APP_NAME,
             "gameDirectory": str(mc_dir),
             "username": username,
-            "uuid": "00000000-0000-0000-0000-000000000000",
-            "token": "0" # Offline token
+            # Insert valid UUID and Token here for authentication
         }
+        
         cmd = mclib.command.get_minecraft_command(ver_id, str(mc_dir), options)
         subprocess.Popen(cmd, cwd=str(mc_dir))
 
@@ -130,21 +134,39 @@ class Backend:
         try: os.remove(path); return True
         except: return False
 
-    def install_instance(self, name, version, loader="Fabric"):
+    def install_instance(self, name, version, loader):
         inst_dir = BASE_DIR / name
         if inst_dir.exists(): return False, "Exists"
         inst_dir.mkdir(parents=True)
         mc_dir = inst_dir / ".minecraft"
+        
         try:
+            # 1. Always install Vanilla Client first (Base)
             mclib.install.install_minecraft_version(version, str(mc_dir))
-            if loader == "Fabric": mclib.fabric.install_fabric(version, str(mc_dir))
-            with open(inst_dir / "instance.json", "w") as f: json.dump({"name": name, "version": version, "loader": loader}, f)
+            
+            # 2. Install Loader on top
+            if loader == "Fabric":
+                mclib.fabric.install_fabric(version, str(mc_dir))
+            elif loader == "Forge":
+                mclib.forge.install_forge_version(version, str(mc_dir))
+            elif loader == "Quilt":
+                mclib.quilt.install_quilt(version, str(mc_dir))
+            
+            # 3. Save Config
+            with open(inst_dir / "instance.json", "w") as f: 
+                json.dump({"name": name, "version": version, "loader": loader}, f)
+                
             return True, "Created"
-        except Exception as e: return False, str(e)
+        except Exception as e: 
+            if inst_dir.exists(): shutil.rmtree(inst_dir)
+            return False, str(e)
 
     def install_mod_from_store(self, project_id, instance_name):
         cfg = self.get_instance_config(instance_name)
-        target = self.modrinth.get_latest_version_file(project_id, ["fabric"], [cfg['version']])
+        loader_filter = cfg['loader'].lower()
+        if loader_filter == "vanilla": loader_filter = "fabric" 
+        
+        target = self.modrinth.get_latest_version_file(project_id, [loader_filter], [cfg['version']])
         if not target: return False, "No compatible version"
         save_path = BASE_DIR / instance_name / ".minecraft/mods" / target['filename']
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -179,7 +201,7 @@ class App(ctk.CTk):
         super().__init__()
         self.backend = Backend()
         self.current_inst = None
-        self.title("IbraMod (Offline)")
+        self.title(APP_NAME)
         self.geometry("1100x700")
         
         self.grid_columnconfigure(1, weight=1)
@@ -195,13 +217,12 @@ class App(ctk.CTk):
         self.inst_list = ctk.CTkScrollableFrame(self.sidebar)
         self.inst_list.pack(fill="both", expand=True, padx=5, pady=10)
         
-        # OFFLINE LOGIN BOX
+        # Login Box
         self.login_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.login_frame.pack(side="bottom", fill="x", padx=10, pady=20)
         ctk.CTkLabel(self.login_frame, text="Username:", font=("Arial", 12)).pack(anchor="w")
-        self.entry_user = ctk.CTkEntry(self.login_frame, placeholder_text="Ibra")
+        self.entry_user = ctk.CTkEntry(self.login_frame, placeholder_text="Player")
         self.entry_user.pack(fill="x", pady=(0,5))
-        self.entry_user.insert(0, "Ibra")
 
         # Main Area
         self.main = ctk.CTkFrame(self, corner_radius=0)
@@ -354,20 +375,30 @@ class App(ctk.CTk):
 
     def dialog_create(self):
         d = ctk.CTkToplevel(self)
-        d.geometry("300x200")
+        d.geometry("300x300")
         d.title("Create Instance")
-        ctk.CTkLabel(d, text="Name").pack(pady=(10,0))
+        
+        # Name Input
+        ctk.CTkLabel(d, text="Instance Name").pack(pady=(10,0))
         en = ctk.CTkEntry(d)
         en.pack(pady=5)
         
-        ctk.CTkLabel(d, text="Version (e.g. 1.20.1)").pack(pady=(10,0))
+        # Version Input
+        ctk.CTkLabel(d, text="Game Version (e.g. 1.20.1)").pack(pady=(10,0))
         ev = ctk.CTkEntry(d)
         ev.pack(pady=5)
         ev.insert(0, "1.20.1")
+
+        # Loader Selector
+        ctk.CTkLabel(d, text="Mod Loader").pack(pady=(10,0))
+        loader_var = ctk.StringVar(value="Fabric")
+        loader_menu = ctk.CTkOptionMenu(d, values=["Vanilla", "Fabric", "Forge", "Quilt"], variable=loader_var)
+        loader_menu.pack(pady=5)
         
         def run():
             btn_create.configure(state="disabled", text="Creating...")
-            self.backend.install_instance(en.get(), ev.get())
+            res, msg = self.backend.install_instance(en.get(), ev.get(), loader_var.get())
+            if not res: messagebox.showerror("Error", msg)
             self.refresh_instances()
             d.destroy()
             
