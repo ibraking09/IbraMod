@@ -4,7 +4,6 @@ import subprocess
 import threading
 import json
 import os
-import sys
 import requests
 import zipfile
 import shutil
@@ -27,19 +26,14 @@ class Modrinth:
     def search(self, query="", index="relevance", facet_type="mod", version=None, loader=None):
         if not query: return []
         
-        # 1. Start with Project Type (Mod or Modpack)
         facets_list = [[f"project_type:{facet_type}"]]
         
-        # 2. Add Version Filter
         if version and facet_type == "mod":
             facets_list.append([f"versions:{version}"])
             
-        # 3. Add Loader Filter
         if loader and facet_type == "mod":
             l = loader.lower()
-            if l == "vanilla": l = "fabric" # Default to Fabric results for Vanilla users
-            
-            # Removed Quilt from this list
+            if l == "vanilla": l = "fabric" 
             if l in ["forge", "fabric", "neoforge"]:
                 facets_list.append([f"categories:{l}"])
 
@@ -62,12 +56,17 @@ class Modrinth:
         resp = requests.get(f"{self.BASE}/project/{project_id}/version", params=params).json()
         return resp[0]['files'][0] if resp else None
 
+    def get_project_versions(self, project_id):
+        try:
+            # We fetch purely the list here.
+            return requests.get(f"{self.BASE}/project/{project_id}/version").json()
+        except: return []
+
 # --- Backend Logic ---
 class Backend:
     def __init__(self):
         self.modrinth = Modrinth()
         self.name_cache = self.load_cache()
-        self.username = "Player"
 
     def load_cache(self):
         if CACHE_FILE.exists():
@@ -89,20 +88,29 @@ class Backend:
         inst_dir = BASE_DIR / name
         mc_dir = inst_dir / ".minecraft"
         config = self.get_instance_config(name)
-        loader_type = config.get("loader", "Vanilla").lower()
+        
+        # 1. Try to use the exact version ID we saved
+        ver_id = config.get("version")
         
         installed = mclib.utils.get_installed_versions(str(mc_dir))
-        if not installed: return
+        installed_ids = [v['id'] for v in installed]
         
-        ver_id = None
-        for v in installed:
-            vid = v['id']
-            if loader_type == "fabric" and "fabric" in vid.lower(): ver_id = vid; break
-            elif loader_type == "forge" and "forge" in vid.lower(): ver_id = vid; break
-            elif loader_type == "vanilla" and "fabric" not in vid and "forge" not in vid: ver_id = vid; break
-        
-        if not ver_id: ver_id = installed[0]['id']
-        print(f"Launching Version ID: {ver_id} as {username} (Loader: {loader_type})")
+        # 2. If saved ID is missing or invalid, try to guess intelligently
+        if not ver_id or ver_id not in installed_ids:
+            print(f"Saved version {ver_id} not found. Searching...")
+            loader_type = config.get("loader", "Vanilla").lower()
+            ver_id = None
+            
+            for vid in installed_ids:
+                if loader_type == "fabric" and "fabric" in vid.lower(): ver_id = vid; break
+                elif loader_type == "forge" and "forge" in vid.lower(): ver_id = vid; break
+                # For modpacks, try to find ANY loader
+                elif loader_type == "modpack" and ("fabric" in vid.lower() or "forge" in vid.lower()): ver_id = vid; break
+            
+            if not ver_id and installed_ids: 
+                ver_id = installed_ids[0] # Ultimate fallback
+
+        print(f"Launching Version ID: {ver_id} as {username}")
 
         options = {
             "launcherName": APP_NAME,
@@ -157,41 +165,32 @@ class Backend:
         inst_dir = BASE_DIR / name
         if inst_dir.exists(): return False, "Instance name already exists."
         
-        # Create directories
         inst_dir.mkdir(parents=True)
         mc_dir = inst_dir / ".minecraft"
         mc_dir.mkdir(parents=True, exist_ok=True)
         
         try:
-            # 1. ALWAYS Install Vanilla First (Base Game)
             print(f"Installing Vanilla {version}...")
             mclib.install.install_minecraft_version(version, str(mc_dir))
             
-            # 2. Install Loader
             if loader == "Fabric":
                 print("Installing Fabric...")
                 mclib.fabric.install_fabric(version, str(mc_dir))
                 
             elif loader == "Forge":
                 print(f"Searching for Forge version for {version}...")
-                # FIXED: This correctly finds the right Forge ID (e.g., 1.20.1-47.2.0)
                 forge_ver = mclib.forge.find_forge_version(version)
-                if forge_ver is None:
-                    raise ValueError(f"No Forge version found for Minecraft {version}")
-                
+                if forge_ver is None: raise ValueError(f"No Forge found for {version}")
                 print(f"Installing Forge {forge_ver}...")
                 mclib.forge.install_forge_version(forge_ver, str(mc_dir))
             
-            # 3. Save Configuration
             with open(inst_dir / "instance.json", "w") as f: 
                 json.dump({"name": name, "version": version, "loader": loader}, f)
                 
             return True, "Created"
             
         except Exception as e:
-            # Clean up partial install on failure
-            if inst_dir.exists():
-                shutil.rmtree(inst_dir)
+            if inst_dir.exists(): shutil.rmtree(inst_dir)
             print(f"Install failed: {e}")
             return False, f"Error: {str(e)}"
 
@@ -202,6 +201,7 @@ class Backend:
         
         target = self.modrinth.get_latest_version_file(project_id, [loader_filter], [cfg['version']])
         if not target: return False, "No compatible version"
+        
         save_path = BASE_DIR / instance_name / ".minecraft/mods" / target['filename']
         save_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -211,24 +211,59 @@ class Backend:
             return True, f"Installed {target['filename']}"
         except Exception as e: return False, str(e)
 
-    def install_modpack_from_store(self, project_id, pack_name):
-        target = self.modrinth.get_latest_version_file(project_id, [])
-        if not target: return False, "No file found"
-        temp_path = TEMP_DIR / target['filename']
-        try:
-            with requests.get(target['url'], stream=True) as r:
-                with open(temp_path, 'wb') as f: f.write(r.content)
-            inst_dir = BASE_DIR / pack_name
-            if inst_dir.exists(): return False, "Name taken"
-            inst_dir.mkdir(parents=True)
-            mclib.mrpack.install_mrpack(str(temp_path), str(inst_dir / ".minecraft"))
-            versions = mclib.utils.get_installed_versions(str(inst_dir / ".minecraft"))
-            v_id = versions[0]['id'] if versions else "Unknown"
-            with open(inst_dir / "instance.json", "w") as f: json.dump({"name": pack_name, "version": v_id, "loader": "Modpack"}, f)
-            os.remove(temp_path)
-            return True, "Modpack Installed!"
-        except Exception as e: return False, str(e)
+    def install_modpack_from_store(self, project_id, pack_name, version_data=None):
+        # NOTE: Version selection is now handled by the UI before calling this!
+        if not version_data:
+            return False, "Version data missing"
 
+        # 2. Setup
+        inst_dir = BASE_DIR / pack_name
+        if inst_dir.exists(): return False, "Name already taken"
+        
+        try:
+            # 3. Download
+            target_file = version_data['files'][0]
+            temp_path = TEMP_DIR / target_file['filename']
+            print(f"Downloading {target_file['filename']}...")
+            with requests.get(target_file['url'], stream=True) as r:
+                with open(temp_path, 'wb') as f: shutil.copyfileobj(r.raw, f)
+            
+            # 4. Install
+            print("Installing Modpack Files...")
+            inst_dir.mkdir(parents=True)
+            mc_dir = inst_dir / ".minecraft"
+            mclib.mrpack.install_mrpack(str(temp_path), str(mc_dir))
+            
+            # 5. FIND THE LOADER VERSION (Critical Fix)
+            installed_vers = mclib.utils.get_installed_versions(str(mc_dir))
+            final_version_id = None
+            loader_type = "Modpack"
+            
+            for v in installed_vers:
+                vid = v['id'].lower()
+                if "fabric" in vid or "forge" in vid or "quilt" in vid or "neoforge" in vid:
+                    final_version_id = v['id']
+                    if "fabric" in vid: loader_type = "Fabric"
+                    elif "forge" in vid: loader_type = "Forge"
+                    break
+            
+            if not final_version_id and installed_vers:
+                final_version_id = installed_vers[0]['id']
+
+            # 6. Save Config
+            with open(inst_dir / "instance.json", "w") as f:
+                json.dump({
+                    "name": pack_name, 
+                    "version": final_version_id,
+                    "loader": loader_type
+                }, f)
+            
+            os.remove(temp_path)
+            return True, f"Installed {pack_name}"
+
+        except Exception as e:
+            if inst_dir.exists(): shutil.rmtree(inst_dir)
+            return False, str(e)
 
 # --- UI ---
 class App(ctk.CTk):
@@ -252,14 +287,14 @@ class App(ctk.CTk):
         self.inst_list = ctk.CTkScrollableFrame(self.sidebar)
         self.inst_list.pack(fill="both", expand=True, padx=5, pady=10)
         
-        # Login Box
+        # Login
         self.login_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.login_frame.pack(side="bottom", fill="x", padx=10, pady=20)
         ctk.CTkLabel(self.login_frame, text="Username:", font=("Arial", 12)).pack(anchor="w")
         self.entry_user = ctk.CTkEntry(self.login_frame, placeholder_text="Player")
         self.entry_user.pack(fill="x", pady=(0,5))
 
-        # Main Area
+        # Main
         self.main = ctk.CTkFrame(self, corner_radius=0)
         self.main.grid(row=0, column=1, sticky="nsew")
         
@@ -297,6 +332,7 @@ class App(ctk.CTk):
         self.entry_mod = ctk.CTkEntry(frame, placeholder_text="Search Mods...")
         self.entry_mod.pack(side="left", fill="x", expand=True, padx=(0,5))
         self.entry_mod.bind("<Return>", lambda e: self.search_store("mod"))
+        ctk.CTkButton(frame, text="Find Skin Mods", width=120, fg_color="#8E44AD", command=self.find_skin_mods).pack(side="right", padx=5)
         ctk.CTkButton(frame, text="Search", width=80, command=lambda: self.search_store("mod")).pack(side="right")
         self.store_mod_scroll = ctk.CTkScrollableFrame(self.tab_getmods)
         self.store_mod_scroll.pack(fill="both", expand=True)
@@ -325,7 +361,7 @@ class App(ctk.CTk):
 
     def confirm_delete(self):
         if not self.current_inst: return
-        answer = messagebox.askyesno("Delete Instance", f"Are you sure you want to delete '{self.current_inst}'?")
+        answer = messagebox.askyesno("Delete", f"Delete '{self.current_inst}'?")
         if answer:
             self.backend.delete_instance(self.current_inst)
             self.current_inst = None
@@ -358,6 +394,15 @@ class App(ctk.CTk):
         if not user: user = "Player"
         if self.current_inst: threading.Thread(target=lambda: self.backend.launch(self.current_inst, user)).start()
 
+    def find_skin_mods(self):
+        if not self.current_inst: messagebox.showerror("Error", "Select instance first!"); return
+        config = self.backend.get_instance_config(self.current_inst)
+        loader = config.get('loader', 'Vanilla').lower()
+        term = "Fabric Tailor" if loader == "fabric" else "Custom Skin Loader"
+        if loader == "vanilla": term = "skin"
+        self.entry_mod.delete(0, 'end'); self.entry_mod.insert(0, term)
+        self.search_store("mod")
+
     def search_store(self, stype):
         query = self.entry_mod.get() if stype == "mod" else self.entry_pack.get()
         if not query: return
@@ -365,16 +410,12 @@ class App(ctk.CTk):
         for w in scroll.winfo_children(): w.destroy()
         ctk.CTkLabel(scroll, text="Searching...").pack(pady=20)
         
-        # Get Version and Loader info from current instance
-        ver = None
-        loader = None
+        ver, loader = None, None
         if stype == "mod" and self.current_inst:
             config = self.backend.get_instance_config(self.current_inst)
-            ver = config.get('version')
-            loader = config.get('loader')
+            ver, loader = config.get('version'), config.get('loader')
 
         def task():
-            # Pass version and loader to search
             hits = self.backend.modrinth.search(query, facet_type=stype, version=ver, loader=loader)
             self.after(0, lambda: self.render_results(hits, stype, scroll))
         threading.Thread(target=task).start()
@@ -384,6 +425,7 @@ class App(ctk.CTk):
         if not hits: ctk.CTkLabel(scroll, text="No results.").pack(pady=20); return
         installed = set()
         if stype == "mod" and self.current_inst: installed = {m['name'].lower() for m in self.backend.get_mods(self.current_inst)}
+        
         for hit in hits:
             row = ctk.CTkFrame(scroll)
             row.pack(fill="x", pady=5)
@@ -391,9 +433,12 @@ class App(ctk.CTk):
             info.pack(side="left", fill="x", expand=True, padx=10)
             ctk.CTkLabel(info, text=hit['title'], font=("Arial", 14, "bold"), anchor="w").pack(fill="x")
             ctk.CTkLabel(info, text=(hit['description'] or "")[:80]+"...", text_color="gray", anchor="w").pack(fill="x")
+            
             if stype == "mod":
-                if hit['title'].strip().lower() in installed: ctk.CTkButton(row, text="Installed", width=80, state="disabled", fg_color="gray").pack(side="right", padx=10)
-                else: ctk.CTkButton(row, text="Install", width=80, command=lambda pid=hit['project_id']: self.install_mod(pid)).pack(side="right", padx=10)
+                if hit['title'].strip().lower() in installed: 
+                    ctk.CTkButton(row, text="Installed", width=80, state="disabled", fg_color="gray").pack(side="right", padx=10)
+                else: 
+                    ctk.CTkButton(row, text="Install", width=80, command=lambda pid=hit['project_id']: self.install_mod(pid)).pack(side="right", padx=10)
             else:
                 ctk.CTkButton(row, text="Install Pack", width=100, fg_color="#D35400", command=lambda pid=hit['project_id'], t=hit['title']: self.install_pack_dialog(pid, t)).pack(side="right", padx=10)
 
@@ -407,56 +452,88 @@ class App(ctk.CTk):
     def install_pack_dialog(self, pid, title):
         d = ctk.CTkToplevel(self)
         d.geometry("300x150")
+        d.title("Install Pack")
         ctk.CTkLabel(d, text=f"Install '{title}' as:").pack(pady=10)
         e_name = ctk.CTkEntry(d); e_name.pack(); e_name.insert(0, title)
-        def run():
-            btn.configure(state="disabled", text="Installing...")
-            def task():
-                res, msg = self.backend.install_modpack_from_store(pid, e_name.get())
-                print(msg); self.after(0, self.refresh_instances); self.after(0, d.destroy)
-            threading.Thread(target=task).start()
-        btn = ctk.CTkButton(d, text="Install", command=run); btn.pack(pady=10)
+        
+        def run_check():
+            name = e_name.get()
+            d.destroy()
+            # New Logic: Open window first, then load data
+            self.initiate_pack_install(pid, name)
+            
+        ctk.CTkButton(d, text="Next", command=run_check).pack(pady=10)
+
+    def initiate_pack_install(self, pid, name):
+        # Open window immediately with loading state
+        self.open_version_selector(pid, name, loading=True)
+
+    def open_version_selector(self, pid, name, versions=None, loading=False):
+        top = ctk.CTkToplevel(self)
+        top.title(f"Select Version: {name}")
+        top.geometry("400x500")
+        
+        ctk.CTkLabel(top, text="Choose Version", font=("Arial", 16, "bold")).pack(pady=10)
+        scroll = ctk.CTkScrollableFrame(top)
+        scroll.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        if loading:
+            lbl = ctk.CTkLabel(scroll, text="Fetching versions...", font=("Arial", 14))
+            lbl.pack(pady=50)
+            # Fetch in background
+            threading.Thread(target=lambda: self.fetch_versions_async(pid, name, top, scroll, lbl)).start()
+        else:
+            self.populate_versions(scroll, pid, name, versions, top)
+
+    def fetch_versions_async(self, pid, name, top, scroll, lbl):
+        # This runs in background thread
+        versions = self.backend.modrinth.get_project_versions(pid)
+        # Update UI on main thread
+        self.after(0, lambda: self.update_version_list(top, scroll, lbl, pid, name, versions))
+
+    def update_version_list(self, top, scroll, lbl, pid, name, versions):
+        if not top.winfo_exists(): return 
+        lbl.destroy()
+        if not versions:
+            ctk.CTkLabel(scroll, text="No versions found.").pack(pady=20)
+        else:
+            self.populate_versions(scroll, pid, name, versions, top)
+
+    def populate_versions(self, scroll, pid, name, versions, top):
+        for v in versions:
+            v_name = f"{v['name']} ({v['game_versions'][0]})"
+            ctk.CTkButton(scroll, text=v_name, fg_color="#333", anchor="w",
+                          command=lambda v_data=v: [top.destroy(), self.run_pack_install(pid, name, v_data)]).pack(fill="x", pady=2)
+
+    def run_pack_install(self, pid, name, vdata):
+        def task():
+            res, msg = self.backend.install_modpack_from_store(pid, name, vdata)
+            if res:
+                self.after(0, lambda: messagebox.showinfo("Success", msg))
+                self.after(0, self.refresh_instances)
+            else:
+                self.after(0, lambda: messagebox.showerror("Error", msg))
+        threading.Thread(target=task).start()
 
     def dialog_create(self):
         d = ctk.CTkToplevel(self)
         d.geometry("300x300")
         d.title("Create Instance")
-        
-        # Name Input
         ctk.CTkLabel(d, text="Instance Name").pack(pady=(10,0))
-        en = ctk.CTkEntry(d)
-        en.pack(pady=5)
-        
-        # Version Input
+        en = ctk.CTkEntry(d); en.pack(pady=5)
         ctk.CTkLabel(d, text="Game Version (e.g. 1.20.1)").pack(pady=(10,0))
-        ev = ctk.CTkEntry(d)
-        ev.pack(pady=5)
-        ev.insert(0, "1.20.1")
-
-        # Loader Selector - QUILT REMOVED
+        ev = ctk.CTkEntry(d); ev.pack(pady=5); ev.insert(0, "1.20.1")
         ctk.CTkLabel(d, text="Mod Loader").pack(pady=(10,0))
         loader_var = ctk.StringVar(value="Fabric")
-        loader_menu = ctk.CTkOptionMenu(d, values=["Vanilla", "Fabric", "Forge"], variable=loader_var)
-        loader_menu.pack(pady=5)
+        ctk.CTkOptionMenu(d, values=["Vanilla", "Fabric", "Forge"], variable=loader_var).pack(pady=5)
         
         def run():
-            # Run installation
             res, msg = self.backend.install_instance(en.get(), ev.get(), loader_var.get())
-            if not res: 
-                # Show error on main thread
-                self.after(0, lambda: messagebox.showerror("Error", msg))
-            else:
-                self.after(0, self.refresh_instances)
-            
-            # Close window SAFELY
+            if not res: self.after(0, lambda: messagebox.showerror("Error", msg))
+            else: self.after(0, self.refresh_instances)
             self.after(0, d.destroy)
-            
-        def start_thread():
-            btn_create.configure(state="disabled", text="Creating...")
-            threading.Thread(target=run).start()
-
-        btn_create = ctk.CTkButton(d, text="Create", command=start_thread)
-        btn_create.pack(pady=20)
+        
+        ctk.CTkButton(d, text="Create", command=lambda: [ctk.CTkButton(d, text="Creating...", state="disabled").pack(pady=20), threading.Thread(target=run).start()]).pack(pady=20)
 
 if __name__ == "__main__":
     ctk.set_appearance_mode("Dark")
