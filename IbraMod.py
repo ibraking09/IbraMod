@@ -24,14 +24,37 @@ if not TEMP_DIR.exists(): TEMP_DIR.mkdir(parents=True)
 class Modrinth:
     BASE = "https://api.modrinth.com/v2"
 
-    def search(self, query="", index="relevance", facet_type="mod", version=None):
+    def search(self, query="", index="relevance", facet_type="mod", version=None, loader=None):
         if not query: return []
-        facets = [f'["project_type:{facet_type}"]']
+        
+        # 1. Start with Project Type (Mod or Modpack)
+        facets_list = [[f"project_type:{facet_type}"]]
+        
+        # 2. Add Version Filter
         if version and facet_type == "mod":
-            facets.append(f'["versions:{version}"]')
-        params = {'query': query, 'limit': 20, 'index': index, 'facets': "[" + ",".join(facets) + "]"}
-        try: return requests.get(f"{self.BASE}/search", params=params).json().get('hits', [])
-        except: return []
+            facets_list.append([f"versions:{version}"])
+            
+        # 3. Add Loader Filter
+        if loader and facet_type == "mod":
+            l = loader.lower()
+            if l == "vanilla": l = "fabric" # Default to Fabric results for Vanilla users
+            
+            # Removed Quilt from this list
+            if l in ["forge", "fabric", "neoforge"]:
+                facets_list.append([f"categories:{l}"])
+
+        params = {
+            'query': query, 
+            'limit': 20, 
+            'index': index, 
+            'facets': json.dumps(facets_list)
+        }
+        
+        try: 
+            return requests.get(f"{self.BASE}/search", params=params).json().get('hits', [])
+        except Exception as e: 
+            print(f"Search error: {e}")
+            return []
 
     def get_latest_version_file(self, project_id, loaders, game_versions=None):
         params = {'loaders': str(loaders).replace("'", '"')}
@@ -44,7 +67,7 @@ class Backend:
     def __init__(self):
         self.modrinth = Modrinth()
         self.name_cache = self.load_cache()
-        self.username = "Player" 
+        self.username = "Player"
 
     def load_cache(self):
         if CACHE_FILE.exists():
@@ -68,7 +91,6 @@ class Backend:
         config = self.get_instance_config(name)
         loader_type = config.get("loader", "Vanilla").lower()
         
-        # Find the correct version ID to launch
         installed = mclib.utils.get_installed_versions(str(mc_dir))
         if not installed: return
         
@@ -77,20 +99,17 @@ class Backend:
             vid = v['id']
             if loader_type == "fabric" and "fabric" in vid.lower(): ver_id = vid; break
             elif loader_type == "forge" and "forge" in vid.lower(): ver_id = vid; break
-            elif loader_type == "quilt" and "quilt" in vid.lower(): ver_id = vid; break
             elif loader_type == "vanilla" and "fabric" not in vid and "forge" not in vid: ver_id = vid; break
         
-        # Fallback
         if not ver_id: ver_id = installed[0]['id']
-        
         print(f"Launching Version ID: {ver_id} as {username} (Loader: {loader_type})")
 
-        # Standard Authentication Options
         options = {
             "launcherName": APP_NAME,
             "gameDirectory": str(mc_dir),
             "username": username,
-            # Insert valid UUID and Token here for authentication
+            "uuid": "00000000-0000-0000-0000-000000000000",
+            "token": "0"
         }
         
         cmd = mclib.command.get_minecraft_command(ver_id, str(mc_dir), options)
@@ -136,30 +155,45 @@ class Backend:
 
     def install_instance(self, name, version, loader):
         inst_dir = BASE_DIR / name
-        if inst_dir.exists(): return False, "Exists"
+        if inst_dir.exists(): return False, "Instance name already exists."
+        
+        # Create directories
         inst_dir.mkdir(parents=True)
         mc_dir = inst_dir / ".minecraft"
+        mc_dir.mkdir(parents=True, exist_ok=True)
         
         try:
-            # 1. Always install Vanilla Client first (Base)
+            # 1. ALWAYS Install Vanilla First (Base Game)
+            print(f"Installing Vanilla {version}...")
             mclib.install.install_minecraft_version(version, str(mc_dir))
             
-            # 2. Install Loader on top
+            # 2. Install Loader
             if loader == "Fabric":
+                print("Installing Fabric...")
                 mclib.fabric.install_fabric(version, str(mc_dir))
+                
             elif loader == "Forge":
-                mclib.forge.install_forge_version(version, str(mc_dir))
-            elif loader == "Quilt":
-                mclib.quilt.install_quilt(version, str(mc_dir))
+                print(f"Searching for Forge version for {version}...")
+                # FIXED: This correctly finds the right Forge ID (e.g., 1.20.1-47.2.0)
+                forge_ver = mclib.forge.find_forge_version(version)
+                if forge_ver is None:
+                    raise ValueError(f"No Forge version found for Minecraft {version}")
+                
+                print(f"Installing Forge {forge_ver}...")
+                mclib.forge.install_forge_version(forge_ver, str(mc_dir))
             
-            # 3. Save Config
+            # 3. Save Configuration
             with open(inst_dir / "instance.json", "w") as f: 
                 json.dump({"name": name, "version": version, "loader": loader}, f)
                 
             return True, "Created"
-        except Exception as e: 
-            if inst_dir.exists(): shutil.rmtree(inst_dir)
-            return False, str(e)
+            
+        except Exception as e:
+            # Clean up partial install on failure
+            if inst_dir.exists():
+                shutil.rmtree(inst_dir)
+            print(f"Install failed: {e}")
+            return False, f"Error: {str(e)}"
 
     def install_mod_from_store(self, project_id, instance_name):
         cfg = self.get_instance_config(instance_name)
@@ -194,6 +228,7 @@ class Backend:
             os.remove(temp_path)
             return True, "Modpack Installed!"
         except Exception as e: return False, str(e)
+
 
 # --- UI ---
 class App(ctk.CTk):
@@ -329,9 +364,18 @@ class App(ctk.CTk):
         scroll = self.store_mod_scroll if stype == "mod" else self.store_pack_scroll
         for w in scroll.winfo_children(): w.destroy()
         ctk.CTkLabel(scroll, text="Searching...").pack(pady=20)
-        ver = self.backend.get_instance_config(self.current_inst).get('version') if stype == "mod" and self.current_inst else None
+        
+        # Get Version and Loader info from current instance
+        ver = None
+        loader = None
+        if stype == "mod" and self.current_inst:
+            config = self.backend.get_instance_config(self.current_inst)
+            ver = config.get('version')
+            loader = config.get('loader')
+
         def task():
-            hits = self.backend.modrinth.search(query, facet_type=stype, version=ver)
+            # Pass version and loader to search
+            hits = self.backend.modrinth.search(query, facet_type=stype, version=ver, loader=loader)
             self.after(0, lambda: self.render_results(hits, stype, scroll))
         threading.Thread(target=task).start()
 
@@ -389,20 +433,29 @@ class App(ctk.CTk):
         ev.pack(pady=5)
         ev.insert(0, "1.20.1")
 
-        # Loader Selector
+        # Loader Selector - QUILT REMOVED
         ctk.CTkLabel(d, text="Mod Loader").pack(pady=(10,0))
         loader_var = ctk.StringVar(value="Fabric")
-        loader_menu = ctk.CTkOptionMenu(d, values=["Vanilla", "Fabric", "Forge", "Quilt"], variable=loader_var)
+        loader_menu = ctk.CTkOptionMenu(d, values=["Vanilla", "Fabric", "Forge"], variable=loader_var)
         loader_menu.pack(pady=5)
         
         def run():
-            btn_create.configure(state="disabled", text="Creating...")
+            # Run installation
             res, msg = self.backend.install_instance(en.get(), ev.get(), loader_var.get())
-            if not res: messagebox.showerror("Error", msg)
-            self.refresh_instances()
-            d.destroy()
+            if not res: 
+                # Show error on main thread
+                self.after(0, lambda: messagebox.showerror("Error", msg))
+            else:
+                self.after(0, self.refresh_instances)
             
-        btn_create = ctk.CTkButton(d, text="Create", command=lambda: threading.Thread(target=run).start())
+            # Close window SAFELY
+            self.after(0, d.destroy)
+            
+        def start_thread():
+            btn_create.configure(state="disabled", text="Creating...")
+            threading.Thread(target=run).start()
+
+        btn_create = ctk.CTkButton(d, text="Create", command=start_thread)
         btn_create.pack(pady=20)
 
 if __name__ == "__main__":
