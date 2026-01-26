@@ -21,7 +21,7 @@ This started as a student project because I wanted a way to easily manage separa
 
 You don't need Python installed to run this. Just grab the executable for your OS from the **[Releases](../../releases)** page.
 
-- **Windows:** Download `IbraMod.exe` and run it.
+- **Windows:** Download `IbraMod.zip` and extract it, then run IbraMod.exe.
 - **Linux:** Download the binary (named `IbraMod.AppImage`), make it executable (`chmod +x IbraMod.AppImage`), and run it.
 
 ### Option 2: Run from Source
