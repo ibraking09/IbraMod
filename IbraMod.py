@@ -14,6 +14,7 @@ from tkinter import messagebox
 APP_NAME = "IbraMod Launcher"
 BASE_DIR = Path.cwd() / "instances"
 CACHE_FILE = Path.cwd() / "name_cache.json"
+SETTINGS_FILE = Path.cwd() / "settings.json"
 TEMP_DIR = Path.cwd() / "temp"
 
 if not BASE_DIR.exists(): BASE_DIR.mkdir(parents=True)
@@ -58,7 +59,6 @@ class Modrinth:
 
     def get_project_versions(self, project_id):
         try:
-            # We fetch purely the list here.
             return requests.get(f"{self.BASE}/project/{project_id}/version").json()
         except: return []
 
@@ -77,6 +77,23 @@ class Backend:
     def save_cache(self):
         with open(CACHE_FILE, "w") as f: json.dump(self.name_cache, f, indent=4)
 
+    # --- RAM Settings Logic ---
+    def get_ram_setting(self):
+        """Returns RAM in GB (int)"""
+        if SETTINGS_FILE.exists():
+            try:
+                data = json.loads(SETTINGS_FILE.read_text())
+                return data.get("max_ram", 4) # Default to 4GB
+            except: return 4
+        return 4
+
+    def set_ram_setting(self, gb):
+        try:
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump({"max_ram": int(gb)}, f)
+            return True
+        except: return False
+
     def get_instances(self):
         return sorted([d.name for d in BASE_DIR.iterdir() if d.is_dir()])
 
@@ -89,13 +106,15 @@ class Backend:
         mc_dir = inst_dir / ".minecraft"
         config = self.get_instance_config(name)
         
-        # 1. Try to use the exact version ID we saved
-        ver_id = config.get("version")
+        # 1. Get RAM setting
+        ram_gb = self.get_ram_setting()
         
+        # 2. Try to use the exact version ID we saved
+        ver_id = config.get("version")
         installed = mclib.utils.get_installed_versions(str(mc_dir))
         installed_ids = [v['id'] for v in installed]
         
-        # 2. If saved ID is missing or invalid, try to guess intelligently
+        # 3. If saved ID is missing or invalid, try to guess intelligently
         if not ver_id or ver_id not in installed_ids:
             print(f"Saved version {ver_id} not found. Searching...")
             loader_type = config.get("loader", "Vanilla").lower()
@@ -104,20 +123,20 @@ class Backend:
             for vid in installed_ids:
                 if loader_type == "fabric" and "fabric" in vid.lower(): ver_id = vid; break
                 elif loader_type == "forge" and "forge" in vid.lower(): ver_id = vid; break
-                # For modpacks, try to find ANY loader
                 elif loader_type == "modpack" and ("fabric" in vid.lower() or "forge" in vid.lower()): ver_id = vid; break
             
             if not ver_id and installed_ids: 
-                ver_id = installed_ids[0] # Ultimate fallback
+                ver_id = installed_ids[0]
 
-        print(f"Launching Version ID: {ver_id} as {username}")
+        print(f"Launching {ver_id} with {ram_gb}GB RAM...")
 
         options = {
             "launcherName": APP_NAME,
             "gameDirectory": str(mc_dir),
             "username": username,
             "uuid": "00000000-0000-0000-0000-000000000000",
-            "token": "0"
+            "token": "0",
+            "jvmArguments": [f"-Xmx{ram_gb}G", "-Xms512M"] # Inject RAM arguments here
         }
         
         cmd = mclib.command.get_minecraft_command(ver_id, str(mc_dir), options)
@@ -212,29 +231,24 @@ class Backend:
         except Exception as e: return False, str(e)
 
     def install_modpack_from_store(self, project_id, pack_name, version_data=None):
-        # NOTE: Version selection is now handled by the UI before calling this!
         if not version_data:
             return False, "Version data missing"
 
-        # 2. Setup
         inst_dir = BASE_DIR / pack_name
         if inst_dir.exists(): return False, "Name already taken"
         
         try:
-            # 3. Download
             target_file = version_data['files'][0]
             temp_path = TEMP_DIR / target_file['filename']
             print(f"Downloading {target_file['filename']}...")
             with requests.get(target_file['url'], stream=True) as r:
                 with open(temp_path, 'wb') as f: shutil.copyfileobj(r.raw, f)
             
-            # 4. Install
             print("Installing Modpack Files...")
             inst_dir.mkdir(parents=True)
             mc_dir = inst_dir / ".minecraft"
             mclib.mrpack.install_mrpack(str(temp_path), str(mc_dir))
             
-            # 5. FIND THE LOADER VERSION (Critical Fix)
             installed_vers = mclib.utils.get_installed_versions(str(mc_dir))
             final_version_id = None
             loader_type = "Modpack"
@@ -250,7 +264,6 @@ class Backend:
             if not final_version_id and installed_vers:
                 final_version_id = installed_vers[0]['id']
 
-            # 6. Save Config
             with open(inst_dir / "instance.json", "w") as f:
                 json.dump({
                     "name": pack_name, 
@@ -287,12 +300,15 @@ class App(ctk.CTk):
         self.inst_list = ctk.CTkScrollableFrame(self.sidebar)
         self.inst_list.pack(fill="both", expand=True, padx=5, pady=10)
         
-        # Login
+        # Login & Settings
         self.login_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.login_frame.pack(side="bottom", fill="x", padx=10, pady=20)
         ctk.CTkLabel(self.login_frame, text="Username:", font=("Arial", 12)).pack(anchor="w")
         self.entry_user = ctk.CTkEntry(self.login_frame, placeholder_text="Player")
         self.entry_user.pack(fill="x", pady=(0,5))
+        
+        # NEW SETTINGS BUTTON
+        ctk.CTkButton(self.login_frame, text="⚙ Settings (RAM)", fg_color="#555", command=self.dialog_settings).pack(fill="x", pady=5)
 
         # Main
         self.main = ctk.CTkFrame(self, corner_radius=0)
@@ -459,13 +475,11 @@ class App(ctk.CTk):
         def run_check():
             name = e_name.get()
             d.destroy()
-            # New Logic: Open window first, then load data
             self.initiate_pack_install(pid, name)
             
         ctk.CTkButton(d, text="Next", command=run_check).pack(pady=10)
 
     def initiate_pack_install(self, pid, name):
-        # Open window immediately with loading state
         self.open_version_selector(pid, name, loading=True)
 
     def open_version_selector(self, pid, name, versions=None, loading=False):
@@ -480,15 +494,12 @@ class App(ctk.CTk):
         if loading:
             lbl = ctk.CTkLabel(scroll, text="Fetching versions...", font=("Arial", 14))
             lbl.pack(pady=50)
-            # Fetch in background
             threading.Thread(target=lambda: self.fetch_versions_async(pid, name, top, scroll, lbl)).start()
         else:
             self.populate_versions(scroll, pid, name, versions, top)
 
     def fetch_versions_async(self, pid, name, top, scroll, lbl):
-        # This runs in background thread
         versions = self.backend.modrinth.get_project_versions(pid)
-        # Update UI on main thread
         self.after(0, lambda: self.update_version_list(top, scroll, lbl, pid, name, versions))
 
     def update_version_list(self, top, scroll, lbl, pid, name, versions):
@@ -514,6 +525,33 @@ class App(ctk.CTk):
             else:
                 self.after(0, lambda: messagebox.showerror("Error", msg))
         threading.Thread(target=task).start()
+
+    # --- SETTINGS DIALOG (NEW) ---
+    def dialog_settings(self):
+        d = ctk.CTkToplevel(self)
+        d.geometry("400x250")
+        d.title("Settings")
+        
+        ctk.CTkLabel(d, text="Max RAM (GB)", font=("Arial", 16, "bold")).pack(pady=(20, 10))
+        
+        current_ram = self.backend.get_ram_setting()
+        
+        lbl_val = ctk.CTkLabel(d, text=f"{current_ram} GB", font=("Arial", 14))
+        lbl_val.pack(pady=5)
+        
+        def update_label(val):
+            lbl_val.configure(text=f"{int(val)} GB")
+
+        slider = ctk.CTkSlider(d, from_=1, to=16, number_of_steps=15, command=update_label)
+        slider.pack(pady=10, fill="x", padx=40)
+        slider.set(current_ram)
+        
+        def save():
+            self.backend.set_ram_setting(int(slider.get()))
+            messagebox.showinfo("Saved", f"RAM set to {int(slider.get())} GB")
+            d.destroy()
+
+        ctk.CTkButton(d, text="Save Settings", command=save, fg_color="green").pack(pady=20)
 
     def dialog_create(self):
         d = ctk.CTkToplevel(self)
