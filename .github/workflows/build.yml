@@ -24,7 +24,6 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        # Using --collect-all to fix the customtkinter error you saw earlier
         pyinstaller --noconfirm --onedir --windowed --name "IbraMod" --collect-all customtkinter IbraMod.py
 
     - name: Zip the Build
