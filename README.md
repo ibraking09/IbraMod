@@ -44,7 +44,7 @@ pip install -r requirements.txt
 python IbraMod.py
 ```
 
-## 🔄 How to Update
+## How to Update
 
 To update the launcher to a new version without losing your worlds, mods, or instances, follow these simple steps.
 
