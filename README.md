@@ -24,7 +24,7 @@ You don't need Python installed to run this. Just grab the executable for your O
 - **Windows:** Download `IbraMod.zip` and extract it, then run IbraMod.exe.
 - **Linux:** Download the binary (named `IbraMod.AppImage`), make it executable (`chmod +x IbraMod.AppImage`), and run it.
 
-### Option 2: Run from Source
+### Option 2: Run from Source (Required for MacOS)
 
 If you prefer to run the raw Python code:
 
