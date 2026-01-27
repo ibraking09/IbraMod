@@ -5,7 +5,7 @@
 This started as a student project because I wanted a way to easily manage separate instances (like having one folder for Fabric 1.20 and another for Forge 1.19) without the bloat of larger launchers. It lets you search and install mods directly from Modrinth, and keeps your instances isolated so your modpacks don't break each other.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ## Features
