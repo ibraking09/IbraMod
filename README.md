@@ -44,6 +44,27 @@ pip install -r requirements.txt
 python IbraMod.py
 ```
 
+## 🔄 How to Update
+
+To update the launcher to a new version without losing your worlds, mods, or instances, follow these simple steps.
+
+### Windows
+1. Download the new `IbraMod.zip` from the [Releases page](../../releases).
+2. Open the folder where your current `IbraMod.exe` is located.
+3. **Delete** the old `IbraMod.exe` file.
+4. Open the new `IbraMod.zip` and drag the new `IbraMod.exe` into your launcher folder.
+   > **Important:** Do not delete or replace your `instances` folder. That is where your data is saved.
+5. Run the new `IbraMod.exe`. All your existing instances will be there.
+
+### Linux
+1. Download the new `IbraMod.AppImage` from the [Releases page](../../releases).
+2. Navigate to the folder containing your current AppImage.
+3. **Delete** the old `.AppImage` file.
+4. Move the new `IbraMod.AppImage` into the same folder.
+5. Make sure the new file is executable:
+   ```bash
+   chmod +x IbraMod.AppImage
+
 ## Building it Yourself
 
 If you want to compile the `.exe` or binary yourself (or if you are on Linux and want to build the executable locally), I use **PyInstaller**.
