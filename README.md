@@ -71,7 +71,7 @@ If you want to compile the `.exe` or binary yourself (or if you are on Linux and
 
 **Linux Command:**
 ```bash
-pyinstaller --noconfirm --onefile --windowed --name "IbraMod" --collect-all customtkinter mc_manager.py
+pyinstaller --noconfirm --onefile --windowed --name "IbraMod" --collect-all customtkinter IbraMod.py
 ```
 
 **Windows:**
