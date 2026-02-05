@@ -7,59 +7,70 @@ import os
 import requests
 import zipfile
 import shutil
+import platform
+import time
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
+from PIL import Image
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+# --- DISCORD RPC SETUP ---
+# Try to import pypresence. If not installed, Discord features will simply be disabled.
+try:
+    from pypresence import Presence
+    HAS_DISCORD = True
+except ImportError:
+    HAS_DISCORD = False
+    print("pypresence not installed. Discord RPC disabled.")
+
+# REPLACE THIS WITH YOUR OWN DISCORD APP ID
+DISCORD_CLIENT_ID = "1468848872154468352" 
 
 # --- Constants ---
-APP_NAME = "IbraMod Launcher"
+APP_NAME = "IbraMod Launcher v3.0"
 BASE_DIR = Path.cwd() / "instances"
 CACHE_FILE = Path.cwd() / "name_cache.json"
 SETTINGS_FILE = Path.cwd() / "settings.json"
 TEMP_DIR = Path.cwd() / "temp"
 
+# Ensure directories exist
 if not BASE_DIR.exists(): BASE_DIR.mkdir(parents=True)
 if not TEMP_DIR.exists(): TEMP_DIR.mkdir(parents=True)
 
 # --- Modrinth API Client ---
 class Modrinth:
     BASE = "https://api.modrinth.com/v2"
+    HEADERS = {"User-Agent": "IbraMod-Launcher/3.0"}
 
     def search(self, query="", index="relevance", facet_type="mod", version=None, loader=None):
         if not query: return []
-        
         facets_list = [[f"project_type:{facet_type}"]]
-        
         if version and facet_type == "mod":
             facets_list.append([f"versions:{version}"])
-            
         if loader and facet_type == "mod":
             l = loader.lower()
             if l == "vanilla": l = "fabric" 
             if l in ["forge", "fabric", "neoforge"]:
                 facets_list.append([f"categories:{l}"])
-
-        params = {
-            'query': query, 
-            'limit': 20, 
-            'index': index, 
-            'facets': json.dumps(facets_list)
-        }
-        
+        params = {'query': query, 'limit': 20, 'index': index, 'facets': json.dumps(facets_list)}
         try: 
-            return requests.get(f"{self.BASE}/search", params=params).json().get('hits', [])
-        except Exception as e: 
-            print(f"Search error: {e}")
-            return []
+            resp = requests.get(f"{self.BASE}/search", params=params, headers=self.HEADERS)
+            return resp.json().get('hits', [])
+        except: return []
 
     def get_latest_version_file(self, project_id, loaders, game_versions=None):
         params = {'loaders': str(loaders).replace("'", '"')}
         if game_versions: params['game_versions'] = str(game_versions).replace("'", '"')
-        resp = requests.get(f"{self.BASE}/project/{project_id}/version", params=params).json()
-        return resp[0]['files'][0] if resp else None
+        try:
+            resp = requests.get(f"{self.BASE}/project/{project_id}/version", params=params, headers=self.HEADERS)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data: return data[0]['files'][0]
+        except: pass
+        return None
 
     def get_project_versions(self, project_id):
-        try:
-            return requests.get(f"{self.BASE}/project/{project_id}/version").json()
+        try: return requests.get(f"{self.BASE}/project/{project_id}/version", headers=self.HEADERS).json()
         except: return []
 
 # --- Backend Logic ---
@@ -67,6 +78,25 @@ class Backend:
     def __init__(self):
         self.modrinth = Modrinth()
         self.name_cache = self.load_cache()
+        self.discord_rpc = None
+        self.connect_discord()
+
+    def connect_discord(self):
+        if not HAS_DISCORD: return
+        try:
+            self.discord_rpc = Presence(DISCORD_CLIENT_ID)
+            self.discord_rpc.connect()
+            self.update_discord("Idling", "In Launcher")
+        except Exception as e:
+            print(f"Discord connection failed: {e}")
+            self.discord_rpc = None
+
+    def update_discord(self, state, details, start_time=None):
+        if not self.discord_rpc: return
+        try:
+            # Note: "minecraft_icon" must match the asset name you uploaded to Discord Dev Portal
+            self.discord_rpc.update(state=state, details=details, start=start_time, large_image="minecraft_icon", large_text="IbraMod Launcher")
+        except: pass
 
     def load_cache(self):
         if CACHE_FILE.exists():
@@ -77,20 +107,99 @@ class Backend:
     def save_cache(self):
         with open(CACHE_FILE, "w") as f: json.dump(self.name_cache, f, indent=4)
 
-    def get_ram_setting(self):
+    def get_settings(self):
         if SETTINGS_FILE.exists():
-            try:
-                data = json.loads(SETTINGS_FILE.read_text())
-                return data.get("max_ram", 4)
-            except: return 4
-        return 4
+            try: return json.loads(SETTINGS_FILE.read_text())
+            except: pass
+        return {"max_ram": 4, "java_path": "Auto", "low_end_mode": False}
 
-    def set_ram_setting(self, gb):
+    def save_settings(self, data):
+        with open(SETTINGS_FILE, "w") as f: json.dump(data, f, indent=4)
+
+    # --- UPDATED JAVA LOGIC (Windows + Linux Support) ---
+    def find_java_paths(self):
+        paths = ["Auto"]
+        system = platform.system()
+        
+        # 1. Check the system's default "java" command
+        default_java = shutil.which("java")
+        if default_java:
+            paths.append(str(Path(default_java).resolve()))
+
+        # 2. Scan standard installation folders based on OS
+        search_dirs = []
+        if system == "Windows":
+            search_dirs = [
+                Path("C:/Program Files/Java"), 
+                Path("C:/Program Files (x86)/Java"),
+                Path.home() / "AppData/Local/Programs/Eclipse Adoptium",
+                Path.home() / ".jdks"
+            ]
+        elif system == "Linux":
+            search_dirs = [
+                Path("/usr/lib/jvm"),
+                Path("/usr/java"),
+                Path.home() / ".sdkman/candidates/java"
+            ]
+        elif system == "Darwin": # MacOS
+             search_dirs = [
+                Path("/Library/Java/JavaVirtualMachines"),
+                Path.home() / "Library/Java/JavaVirtualMachines"
+             ]
+            
+        for d in search_dirs:
+            if d.exists():
+                for sub in d.iterdir():
+                    bin_name = "javaw.exe" if system == "Windows" else "java"
+                    bin_path = sub / "bin" / bin_name
+                    if bin_path.exists():
+                        paths.append(str(bin_path))
+        
+        return list(dict.fromkeys(paths))
+
+    def get_smart_java(self, mc_version, user_setting="Auto"):
+        if user_setting != "Auto" and user_setting:
+            return user_setting
+
+        # 1. Determine which Java version we need
+        req_ver = 8  # Default for old versions
+        
         try:
-            with open(SETTINGS_FILE, "w") as f:
-                json.dump({"max_ram": int(gb)}, f)
-            return True
-        except: return False
+            # Simple heuristic to parse version
+            clean_ver = "".join([c for c in mc_version if c.isdigit() or c == "."])
+            parts = [int(x) for x in clean_ver.split(".") if x]
+            
+            if len(parts) >= 2:
+                major, minor = parts[0], parts[1]
+                patch = parts[2] if len(parts) > 2 else 0
+                
+                if major == 1:
+                    if minor >= 21:           # 1.21+ -> Java 21
+                        req_ver = 21
+                    elif minor == 20:         # 1.20.x logic
+                        if patch >= 5: req_ver = 21
+                        else:          req_ver = 17
+                    elif minor >= 17:         # 1.17 - 1.19 -> Java 17
+                        req_ver = 17
+        except:
+            print(f"Could not parse version {mc_version}, defaulting to Java 8")
+
+        print(f"Version {mc_version} requires Java {req_ver}")
+
+        # 2. Find the best match
+        available_paths = self.find_java_paths()
+        best_match = None
+        
+        for p in available_paths:
+            if p == "Auto": continue
+            path_str = p.lower()
+            
+            # Look for version numbers in the path string
+            if req_ver == 21 and ("21" in path_str): return p
+            if req_ver == 17 and ("17" in path_str): best_match = p
+            if req_ver == 8 and ("1.8" in path_str or "8" in path_str): best_match = p
+
+        return best_match
 
     def get_latest_mc_version(self):
         try: return mclib.utils.get_latest_version()["release"]
@@ -107,14 +216,20 @@ class Backend:
         inst_dir = BASE_DIR / name
         mc_dir = inst_dir / ".minecraft"
         config = self.get_instance_config(name)
-        ram_gb = self.get_ram_setting()
+        settings = self.get_settings()
         
+        ram_gb = settings.get("max_ram", 4)
+        low_end = settings.get("low_end_mode", False)
+        
+        # Use new smart java logic
+        java_path = self.get_smart_java(config.get("version", "1.20"), settings.get("java_path", "Auto"))
+
+        # --- VERSION LOGIC ---
         ver_id = config.get("version")
         installed = mclib.utils.get_installed_versions(str(mc_dir))
         installed_ids = [v['id'] for v in installed]
         
         if not ver_id or ver_id not in installed_ids:
-            print(f"Saved version {ver_id} not found. Searching...")
             loader_type = config.get("loader", "Vanilla").lower()
             ver_id = None
             for vid in installed_ids:
@@ -123,17 +238,42 @@ class Backend:
                 elif loader_type == "modpack" and ("fabric" in vid.lower() or "forge" in vid.lower()): ver_id = vid; break
             if not ver_id and installed_ids: ver_id = installed_ids[0]
 
-        print(f"Launching {ver_id} with {ram_gb}GB RAM...")
+        # --- JVM ARGUMENTS ---
+        jvm_args = [f"-Xmx{ram_gb}G", "-Xms512M"]
+        if low_end:
+            print("Enabling Low End PC Optimizations...")
+            jvm_args.extend([
+                "-XX:+UseG1GC", "-XX:+ParallelRefProcEnabled", "-XX:MaxGCPauseMillis=200",
+                "-XX:+UnlockExperimentalVMOptions", "-XX:+DisableExplicitGC", "-XX:+AlwaysPreTouch",
+                "-XX:G1NewSizePercent=30", "-XX:G1MaxNewSizePercent=40", "-XX:G1HeapRegionSize=8M",
+                "-XX:G1ReservePercent=20", "-XX:G1HeapWastePercent=5", "-XX:G1MixedGCCountTarget=4"
+            ])
+
         options = {
             "launcherName": APP_NAME,
             "gameDirectory": str(mc_dir),
             "username": username,
             "uuid": "00000000-0000-0000-0000-000000000000",
             "token": "0",
-            "jvmArguments": [f"-Xmx{ram_gb}G", "-Xms512M"]
+            "jvmArguments": jvm_args
         }
+        
+        if java_path:
+            options["executablePath"] = java_path
+            print(f"Using Java: {java_path}")
+        else:
+            print("Using System Default Java")
+
+        print(f"Launching {ver_id}...")
+        
+        self.update_discord("Playing Minecraft", f"{name} ({config.get('loader')})", start_time=int(time.time()))
+
         cmd = mclib.command.get_minecraft_command(ver_id, str(mc_dir), options)
-        subprocess.Popen(cmd, cwd=str(mc_dir))
+        
+        process = subprocess.Popen(cmd, cwd=str(mc_dir))
+        process.wait()
+        
+        self.update_discord("Idling", "In Launcher")
 
     def delete_instance(self, name):
         try: shutil.rmtree(BASE_DIR / name); return True
@@ -158,12 +298,7 @@ class Backend:
         
         for f in mods_dir.iterdir():
             if f.name.endswith('.jar') or f.name.endswith('.disabled'):
-                found.append({
-                    'name': get_clean_name(f), 
-                    'filename': f.name, 
-                    'path': f, 
-                    'disabled': f.name.endswith('.disabled')
-                })
+                found.append({'name': get_clean_name(f), 'filename': f.name, 'path': f, 'disabled': f.name.endswith('.disabled')})
                 if f.name not in self.name_cache: cache_updated = True
         
         if cache_updated: self.save_cache()
@@ -172,15 +307,10 @@ class Backend:
     def toggle_mod(self, path):
         p = Path(path)
         try:
-            if p.name.endswith(".disabled"):
-                new_name = p.name[:-9]
-                p.rename(p.parent / new_name)
-            else:
-                p.rename(p.parent / (p.name + ".disabled"))
+            if p.name.endswith(".disabled"): p.rename(p.parent / p.name[:-9])
+            else: p.rename(p.parent / (p.name + ".disabled"))
             return True
-        except Exception as e: 
-            print(f"Toggle error: {e}")
-            return False
+        except: return False
     
     def delete_mod(self, path):
         try: os.remove(path); return True
@@ -202,7 +332,6 @@ class Backend:
             if loader == "Fabric":
                 if callback: callback['setStatus']("Installing Fabric Loader...")
                 mclib.fabric.install_fabric(version, str(mc_dir))
-                
             elif loader == "Forge":
                 if callback: callback['setStatus']("Searching for Forge...")
                 forge_ver = mclib.forge.find_forge_version(version)
@@ -214,10 +343,8 @@ class Backend:
                 json.dump({"name": name, "version": version, "loader": loader}, f)
                 
             return True, "Created"
-            
         except Exception as e:
             if inst_dir.exists(): shutil.rmtree(inst_dir)
-            print(f"Install failed: {e}")
             return False, f"Error: {str(e)}"
 
     def install_mod_from_store(self, project_id, instance_name, callback=None):
@@ -225,15 +352,14 @@ class Backend:
         loader_filter = cfg['loader'].lower()
         if loader_filter == "vanilla": loader_filter = "fabric" 
         target = self.modrinth.get_latest_version_file(project_id, [loader_filter], [cfg['version']])
-        if not target: return False, "No compatible version"
+        if not target: return False, "No compatible version found on Modrinth."
         
         save_path = BASE_DIR / instance_name / ".minecraft/mods" / target['filename']
         save_path.parent.mkdir(parents=True, exist_ok=True)
         
         try:
             if callback: callback['setStatus'](f"Downloading {target['filename']}...")
-            
-            with requests.get(target['url'], stream=True) as r:
+            with requests.get(target['url'], stream=True, headers=self.modrinth.HEADERS) as r:
                 r.raise_for_status()
                 total_len = int(r.headers.get('content-length', 0))
                 dl = 0
@@ -244,7 +370,6 @@ class Backend:
                         if callback and total_len > 0:
                             callback['setProgress'](int((dl / total_len) * 100))
                             callback['setMax'](100)
-                            
             return True, f"Installed {target['filename']}"
         except Exception as e: return False, str(e)
 
@@ -255,10 +380,8 @@ class Backend:
         try:
             target_file = version_data['files'][0]
             temp_path = TEMP_DIR / target_file['filename']
-            
             if callback: callback['setStatus'](f"Downloading {target_file['filename']}...")
-            
-            with requests.get(target_file['url'], stream=True) as r:
+            with requests.get(target_file['url'], stream=True, headers=self.modrinth.HEADERS) as r:
                 total_len = int(r.headers.get('content-length', 0))
                 dl = 0
                 with open(temp_path, 'wb') as f:
@@ -269,10 +392,7 @@ class Backend:
                              callback['setProgress'](int((dl / total_len) * 100))
                              callback['setMax'](100)
 
-            if callback: 
-                callback['setStatus']("Extracting & Installing Modpack...")
-                callback['setProgress'](0)
-
+            if callback: callback['setStatus']("Extracting & Installing Modpack...")
             inst_dir.mkdir(parents=True)
             mc_dir = inst_dir / ".minecraft"
             mclib.mrpack.install_mrpack(str(temp_path), str(mc_dir))
@@ -299,7 +419,6 @@ class Backend:
             return False, str(e)
 
 # --- UI COMPONENTS ---
-
 class ProgressDialog(ctk.CTkToplevel):
     def __init__(self, parent, title="Processing..."):
         super().__init__(parent)
@@ -308,23 +427,16 @@ class ProgressDialog(ctk.CTkToplevel):
         self.resizable(False, False)
         self.max_val = 100
         self.attributes("-topmost", True)
-        
         self.lbl_status = ctk.CTkLabel(self, text="Starting...", font=("Arial", 12))
         self.lbl_status.pack(pady=(20, 5))
-        
         self.progress = ctk.CTkProgressBar(self, width=300)
         self.progress.pack(pady=10)
         self.progress.set(0)
-        
         self.lbl_percent = ctk.CTkLabel(self, text="0%", font=("Arial", 10, "bold"), text_color="gray")
         self.lbl_percent.pack(pady=(0, 20))
 
-    def update_status(self, text):
-        self.lbl_status.configure(text=text)
-
-    def set_max(self, val):
-        self.max_val = val
-
+    def update_status(self, text): self.lbl_status.configure(text=text)
+    def set_max(self, val): self.max_val = val
     def update_progress(self, val):
         if self.max_val > 0:
             perc = val / self.max_val
@@ -335,10 +447,31 @@ class ProgressDialog(ctk.CTkToplevel):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.backend = Backend()
-        self.current_inst = None
+        
+        # --- ICON & TASKBAR FIX ---
+        if platform.system() == "Windows":
+            try:
+                from ctypes import windll
+                myappid = 'ibramod.launcher.v3.0'
+                windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            except: pass
+
         self.title(APP_NAME)
         self.geometry("1100x700")
+
+        # Set Icon
+        try:
+            if platform.system() == "Windows":
+                self.iconbitmap("app_icon.ico")
+            elif Path("app_icon.png").exists():
+                # Linux Icon Support
+                img = ctk.CTkImage(Image.open("app_icon.png"))
+                self.iconphoto(False, img)
+        except Exception as e:
+            print(f"Icon load failed: {e}")
+
+        self.backend = Backend()
+        self.current_inst = None
         
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -357,7 +490,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(self.login_frame, text="Username:", font=("Arial", 12)).pack(anchor="w")
         self.entry_user = ctk.CTkEntry(self.login_frame, placeholder_text="Player")
         self.entry_user.pack(fill="x", pady=(0,5))
-        ctk.CTkButton(self.login_frame, text="⚙ Settings (RAM)", fg_color="#555", command=self.dialog_settings).pack(fill="x", pady=5)
+        ctk.CTkButton(self.login_frame, text="⚙ Launcher Settings", fg_color="#555", command=self.dialog_settings).pack(fill="x", pady=5)
 
         # Main
         self.main = ctk.CTkFrame(self, corner_radius=0)
@@ -396,7 +529,6 @@ class App(ctk.CTk):
         self.entry_mod = ctk.CTkEntry(frame, placeholder_text="Search Mods...")
         self.entry_mod.pack(side="left", fill="x", expand=True, padx=(0,5))
         self.entry_mod.bind("<Return>", lambda e: self.search_store("mod"))
-        ctk.CTkButton(frame, text="Find Skin Mods", width=120, fg_color="#8E44AD", command=self.find_skin_mods).pack(side="right", padx=5)
         ctk.CTkButton(frame, text="Search", width=80, command=lambda: self.search_store("mod")).pack(side="right")
         self.store_mod_scroll = ctk.CTkScrollableFrame(self.tab_getmods)
         self.store_mod_scroll.pack(fill="both", expand=True)
@@ -456,16 +588,12 @@ class App(ctk.CTk):
     def launch(self):
         user = self.entry_user.get()
         if not user: user = "Player"
-        if self.current_inst: threading.Thread(target=lambda: self.backend.launch(self.current_inst, user)).start()
-
-    def find_skin_mods(self):
-        if not self.current_inst: messagebox.showerror("Error", "Select instance first!"); return
-        config = self.backend.get_instance_config(self.current_inst)
-        loader = config.get('loader', 'Vanilla').lower()
-        term = "Fabric Tailor" if loader == "fabric" else "Custom Skin Loader"
-        if loader == "vanilla": term = "skin"
-        self.entry_mod.delete(0, 'end'); self.entry_mod.insert(0, term)
-        self.search_store("mod")
+        if self.current_inst: 
+            self.btn_play.configure(text="RUNNING...", state="disabled", fg_color="gray")
+            def run():
+                self.backend.launch(self.current_inst, user)
+                self.after(0, lambda: self.btn_play.configure(text="PLAY", state="normal", fg_color="green"))
+            threading.Thread(target=run).start()
 
     def search_store(self, stype):
         query = self.entry_mod.get() if stype == "mod" else self.entry_pack.get()
@@ -485,21 +613,17 @@ class App(ctk.CTk):
     def render_results(self, hits, stype, scroll):
         for w in scroll.winfo_children(): w.destroy()
         if not hits: ctk.CTkLabel(scroll, text="No results.").pack(pady=20); return
-        
         installed = set()
         if stype == "mod" and self.current_inst: 
             installed = {m['name'].strip().lower() for m in self.backend.get_mods(self.current_inst)}
-
         for hit in hits:
             row = ctk.CTkFrame(scroll)
             row.pack(fill="x", pady=5)
             info = ctk.CTkFrame(row, fg_color="transparent")
             info.pack(side="left", fill="x", expand=True, padx=10)
-            
             title = hit['title']
             ctk.CTkLabel(info, text=title, font=("Arial", 14, "bold"), anchor="w").pack(fill="x")
             ctk.CTkLabel(info, text=(hit['description'] or "")[:80]+"...", text_color="gray", anchor="w").pack(fill="x")
-            
             if stype == "mod":
                 if title.strip().lower() in installed:
                     ctk.CTkButton(row, text="✓ Installed", width=100, state="disabled", fg_color="gray").pack(side="right", padx=10)
@@ -510,44 +634,35 @@ class App(ctk.CTk):
 
     def install_mod(self, pid, title):
         if not self.current_inst: return messagebox.showerror("Error", "Select an instance first!")
-        
         prog = ProgressDialog(self, title=f"Installing {title}...")
         prog.protocol("WM_DELETE_WINDOW", lambda: None)
-        
         callback = {
             "setStatus": lambda text: self.after(0, lambda: prog.update_status(text)),
             "setProgress": lambda val: self.after(0, lambda: prog.update_progress(val)),
             "setMax": lambda val: self.after(0, lambda: prog.set_max(val))
         }
-
         def task():
             res, msg = self.backend.install_mod_from_store(pid, self.current_inst, callback)
             self.after(0, prog.destroy)
-            
             if res:
                 self.after(0, lambda: self.load_instance(self.current_inst)) 
                 self.after(0, lambda: self.search_store("mod"))
             else:
                 self.after(0, lambda: messagebox.showerror("Error", msg))
-                
         threading.Thread(target=task).start()
 
     def install_pack_dialog(self, pid, title):
         d = ctk.CTkToplevel(self)
         d.geometry("300x150")
         d.title("Install Pack")
-        
         ctk.CTkLabel(d, text=f"Install '{title}' as:").pack(pady=10)
         e_name = ctk.CTkEntry(d)
         e_name.pack()
         e_name.insert(0, title)
-        
-        # FIX: Get name BEFORE destroying window
         def next_step():
             pack_name = e_name.get()
             d.destroy()
             self.open_version_selector(pid, pack_name, loading=True)
-
         ctk.CTkButton(d, text="Next", command=next_step).pack(pady=10)
 
     def open_version_selector(self, pid, name, versions=None, loading=False):
@@ -582,13 +697,11 @@ class App(ctk.CTk):
     def run_pack_install(self, pid, name, vdata):
         prog = ProgressDialog(self, title=f"Installing {name}")
         prog.protocol("WM_DELETE_WINDOW", lambda: None)
-        
         callback = {
             "setStatus": lambda text: self.after(0, lambda: prog.update_status(text)),
             "setProgress": lambda val: self.after(0, lambda: prog.update_progress(val)),
             "setMax": lambda val: self.after(0, lambda: prog.set_max(val))
         }
-
         def task():
             res, msg = self.backend.install_modpack_from_store(pid, name, vdata, callback)
             self.after(0, prog.destroy)
@@ -601,81 +714,88 @@ class App(ctk.CTk):
 
     def dialog_settings(self):
         d = ctk.CTkToplevel(self)
-        d.geometry("400x250")
+        d.geometry("450x450")
         d.title("Settings")
-        ctk.CTkLabel(d, text="Max RAM (GB)", font=("Arial", 16, "bold")).pack(pady=(20, 10))
-        current_ram = self.backend.get_ram_setting()
-        lbl_val = ctk.CTkLabel(d, text=f"{current_ram} GB", font=("Arial", 14))
-        lbl_val.pack(pady=5)
-        def update_label(val): lbl_val.configure(text=f"{int(val)} GB")
-        slider = ctk.CTkSlider(d, from_=1, to=16, number_of_steps=15, command=update_label)
-        slider.pack(pady=10, fill="x", padx=40)
-        slider.set(current_ram)
+        
+        settings = self.backend.get_settings()
+        
+        # RAM
+        ctk.CTkLabel(d, text="Max RAM (GB)", font=("Arial", 14, "bold")).pack(pady=(20, 5))
+        lbl_ram = ctk.CTkLabel(d, text=f"{settings['max_ram']} GB")
+        lbl_ram.pack()
+        slider_ram = ctk.CTkSlider(d, from_=1, to=16, number_of_steps=15, command=lambda v: lbl_ram.configure(text=f"{int(v)} GB"))
+        slider_ram.set(settings['max_ram'])
+        slider_ram.pack(fill="x", padx=40, pady=5)
+        
+        # Low End Mode
+        ctk.CTkLabel(d, text="Performance", font=("Arial", 14, "bold")).pack(pady=(20, 5))
+        var_lowend = ctk.BooleanVar(value=settings['low_end_mode'])
+        sw_lowend = ctk.CTkSwitch(d, text="Low End PC Mode (FPS Boost)", variable=var_lowend)
+        sw_lowend.pack(pady=5)
+        
+        # Java Path
+        ctk.CTkLabel(d, text="Java Executable", font=("Arial", 14, "bold")).pack(pady=(20, 5))
+        java_paths = self.backend.find_java_paths()
+        combo_java = ctk.CTkComboBox(d, values=java_paths, width=300)
+        combo_java.set(settings.get("java_path", "Auto"))
+        combo_java.pack(pady=5)
+        ctk.CTkLabel(d, text="Set to 'Auto' to let IbraMod pick Java 8/17/21 automatically.", text_color="gray", font=("Arial", 10)).pack()
+
         def save():
-            self.backend.set_ram_setting(int(slider.get()))
-            messagebox.showinfo("Saved", f"RAM set to {int(slider.get())} GB")
+            new_data = {
+                "max_ram": int(slider_ram.get()),
+                "low_end_mode": var_lowend.get(),
+                "java_path": combo_java.get()
+            }
+            self.backend.save_settings(new_data)
+            messagebox.showinfo("Saved", "Settings Updated!")
             d.destroy()
-        ctk.CTkButton(d, text="Save Settings", command=save, fg_color="green").pack(pady=20)
+            
+        ctk.CTkButton(d, text="Save Settings", command=save, fg_color="green").pack(pady=30)
 
     def dialog_create(self):
         d = ctk.CTkToplevel(self)
         d.geometry("300x350") 
         d.title("Create Instance")
-        
         ctk.CTkLabel(d, text="Instance Name").pack(pady=(10,0))
         en = ctk.CTkEntry(d)
         en.pack(pady=5)
-        
         ctk.CTkLabel(d, text="Game Version").pack(pady=(10,0))
         ver_frame = ctk.CTkFrame(d, fg_color="transparent")
         ver_frame.pack(fill="x", padx=40)
-        
         ev = ctk.CTkEntry(ver_frame)
         ev.pack(side="left", fill="x", expand=True)
         ev.insert(0, "1.20.1")
-        
         def fetch_latest():
             btn_latest.configure(text="Fetching...", state="disabled")
             def run():
                 latest = self.backend.get_latest_mc_version()
                 self.after(0, lambda: [ev.delete(0, 'end'), ev.insert(0, latest if latest else "Error"), btn_latest.configure(text="Get Latest", state="normal")])
             threading.Thread(target=run).start()
-
         btn_latest = ctk.CTkButton(ver_frame, text="Get Latest", width=80, command=fetch_latest)
         btn_latest.pack(side="right", padx=(5,0))
-
         ctk.CTkLabel(d, text="Mod Loader").pack(pady=(10,0))
         loader_var = ctk.StringVar(value="Fabric")
         ctk.CTkOptionMenu(d, values=["Vanilla", "Fabric", "Forge"], variable=loader_var).pack(pady=5)
-        
         def run_install():
             name_val = en.get()
             ver_val = ev.get()
             loader_val = loader_var.get()
-            
-            if not name_val:
-                messagebox.showerror("Error", "Please enter a name")
-                return
-
+            if not name_val: return messagebox.showerror("Error", "Please enter a name")
             d.destroy()
-            
             prog = ProgressDialog(self, title=f"Installing {name_val}...")
             prog.protocol("WM_DELETE_WINDOW", lambda: None)
-
             callback = {
                 "setStatus": lambda text: self.after(0, lambda: prog.update_status(text)),
                 "setProgress": lambda val: self.after(0, lambda: prog.update_progress(val)),
                 "setMax": lambda val: self.after(0, lambda: prog.set_max(val))
             }
-            
             def task():
                 res, msg = self.backend.install_instance(name_val, ver_val, loader_val, callback)
                 self.after(0, prog.destroy)
                 if not res: self.after(0, lambda: messagebox.showerror("Error", msg))
                 else: self.after(0, self.refresh_instances)
-            
             threading.Thread(target=task).start()
-
         ctk.CTkButton(d, text="Create", command=run_install).pack(pady=20)
 
 if __name__ == "__main__":
