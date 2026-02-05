@@ -13,7 +13,7 @@ This started as a student project because I wanted a way to easily manage separa
 - **Instance Management:** Create separate folders for different game versions.
 - **Modrinth Integration:** Search for mods and modpacks inside the app. It even detects if you already have a mod installed so you don't download duplicates.
 - **Mod Management:** Enable, disable, or delete mods with a single click.
-- **Clean UI:** Built with CustomTkinter for a modern dark-mode look.
+- **Clean UI:** Built with CustomTkinter for a modern dark theme look.
 
 ## Installation
 
