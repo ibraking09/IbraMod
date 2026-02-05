@@ -24,7 +24,7 @@ except ImportError:
 
 DISCORD_CLIENT_ID = "1468848872154468352"
 
-# --- PATH FIX (The Important Part) ---
+# --- PATH FIX ---
 if getattr(sys, 'frozen', False):
     # If running as an EXE:
     ROOT_DIR = Path(sys.executable).parent      # Save files next to the EXE
@@ -172,7 +172,7 @@ class Backend:
         if user_setting != "Auto" and user_setting:
             return user_setting
 
-        # 1. Determine which Java version we need
+        # 1. Determine which Java version i need
         req_ver = 8  # Default for old versions
         
         try:
