@@ -176,7 +176,7 @@ class Backend:
         req_ver = 8  # Default for old versions
         
         try:
-            # Simple heuristic to parse version
+            # Simple way to parse version
             clean_ver = "".join([c for c in mc_version if c.isdigit() or c == "."])
             parts = [int(x) for x in clean_ver.split(".") if x]
             
@@ -473,7 +473,6 @@ class App(ctk.CTk):
         # Set Icon
         try:
             if platform.system() == "Windows":
-                # NO QUOTES here! uses the variable from the top
                 self.iconbitmap(ICON_FILE)
             else:
                 # Linux/Mac support
