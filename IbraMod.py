@@ -41,7 +41,7 @@ CACHE_FILE = ROOT_DIR / "name_cache.json"
 SETTINGS_FILE = ROOT_DIR / "settings.json"
 TEMP_DIR = ROOT_DIR / "temp"
 
-# Define the Icon Path here so we can use it later
+# Define the Icon Path here so i can use it later
 ICON_FILE = ASSET_DIR / "app_icon.ico"
 ICON_PNG = ASSET_DIR / "app_icon.png"
 
@@ -106,7 +106,6 @@ class Backend:
     def update_discord(self, state, details, start_time=None):
         if not self.discord_rpc: return
         try:
-            # Note: "minecraft_icon" must match the asset name you uploaded to Discord Dev Portal
             self.discord_rpc.update(state=state, details=details, start=start_time, large_image="minecraft_icon", large_text="IbraMod Launcher")
         except: pass
 
@@ -233,7 +232,6 @@ class Backend:
         ram_gb = settings.get("max_ram", 4)
         low_end = settings.get("low_end_mode", False)
         
-        # Use new smart java logic
         java_path = self.get_smart_java(config.get("version", "1.20"), settings.get("java_path", "Auto"))
 
         # --- VERSION LOGIC ---
