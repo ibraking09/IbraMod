@@ -4,6 +4,7 @@ import subprocess
 import threading
 import json
 import os
+import sys
 import requests
 import zipfile
 import shutil
@@ -12,10 +13,8 @@ import time
 from pathlib import Path
 from tkinter import messagebox, filedialog
 from PIL import Image
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # --- DISCORD RPC SETUP ---
-# Try to import pypresence. If not installed, Discord features will simply be disabled.
 try:
     from pypresence import Presence
     HAS_DISCORD = True
@@ -23,17 +22,30 @@ except ImportError:
     HAS_DISCORD = False
     print("pypresence not installed. Discord RPC disabled.")
 
-# REPLACE THIS WITH YOUR OWN DISCORD APP ID
-DISCORD_CLIENT_ID = "1468848872154468352" 
+DISCORD_CLIENT_ID = "1468848872154468352"
 
-# --- Constants ---
+# --- PATH FIX (The Important Part) ---
+if getattr(sys, 'frozen', False):
+    # If running as an EXE:
+    ROOT_DIR = Path(sys.executable).parent      # Save files next to the EXE
+    ASSET_DIR = Path(sys._MEIPASS)              # Load icon from Temp folder
+else:
+    # If running as a script (VS Code):
+    ROOT_DIR = Path(__file__).parent            # Save files next to the script
+    ASSET_DIR = ROOT_DIR                        # Load icon from the script folder
+
+# --- CONSTANTS ---
 APP_NAME = "IbraMod Launcher v3.0"
-BASE_DIR = Path.cwd() / "instances"
-CACHE_FILE = Path.cwd() / "name_cache.json"
-SETTINGS_FILE = Path.cwd() / "settings.json"
-TEMP_DIR = Path.cwd() / "temp"
+BASE_DIR = ROOT_DIR / "instances"
+CACHE_FILE = ROOT_DIR / "name_cache.json"
+SETTINGS_FILE = ROOT_DIR / "settings.json"
+TEMP_DIR = ROOT_DIR / "temp"
 
-# Ensure directories exist
+# Define the Icon Path here so we can use it later
+ICON_FILE = ASSET_DIR / "app_icon.ico"
+ICON_PNG = ASSET_DIR / "app_icon.png"
+
+# Create folders if they don't exist
 if not BASE_DIR.exists(): BASE_DIR.mkdir(parents=True)
 if not TEMP_DIR.exists(): TEMP_DIR.mkdir(parents=True)
 
@@ -460,13 +472,16 @@ class App(ctk.CTk):
         self.geometry("1100x700")
 
         # Set Icon
+        # Set Icon
         try:
             if platform.system() == "Windows":
-                self.iconbitmap("app_icon.ico")
-            elif Path("app_icon.png").exists():
-                # Linux Icon Support
-                img = ctk.CTkImage(Image.open("app_icon.png"))
-                self.iconphoto(False, img)
+                # NO QUOTES here! uses the variable from the top
+                self.iconbitmap(ICON_FILE)
+            else:
+                # Linux/Mac support
+                if ICON_PNG.exists():
+                    img = ctk.CTkImage(Image.open(ICON_PNG))
+                    self.iconphoto(True, img)
         except Exception as e:
             print(f"Icon load failed: {e}")
 
