@@ -1,5 +1,6 @@
 customtkinter
-minecraft-launcher-lib
+minecraft_launcher_lib
 requests
-typing_extensions
 packaging
+pypresence
+Pillow
