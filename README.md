@@ -71,9 +71,8 @@ If you want to compile the `.exe` or binary yourself (or if you are on Linux and
 
 **Linux Command:**
 ```bash
-pyinstaller --noconfirm --onefile --windowed --name "IbraMod" --collect-all customtkinter IbraMod.py
+python3 -m PyInstaller --noconfirm --onefile --windowed --name "IbraMod" --add-data "app_icon.png:." --collect-all customtkinter IbraMod.py```
 ```
-
 **Windows:**
 The project includes a GitHub Actions workflow that automatically builds the `.exe` whenever a new tag is pushed.  
 Check the `.github/workflows` folder to see how it works.
